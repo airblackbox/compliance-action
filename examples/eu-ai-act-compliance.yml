@@ -1,0 +1,34 @@
+# .github/workflows/eu-ai-act-compliance.yml
+#
+# Scans your Python AI code for EU AI Act technical compliance
+# using AIR Blackbox (https://github.com/airblackbox)
+
+name: EU AI Act Compliance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  compliance-scan:
+    runs-on: ubuntu-latest
+    name: AIR Blackbox Compliance Check
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run EU AI Act compliance scan
+        id: compliance
+        uses: airblackbox/compliance-action@v1
+        with:
+          # Uncomment to fail PRs below a threshold:
+          # fail-on-findings: 'true'
+          # min-score: 60
+
+      - name: Print results
+        run: |
+          echo "Compliance Score: ${{ steps.compliance.outputs.score }}/100"
+          echo "Checks Passed: ${{ steps.compliance.outputs.checks-passed }}/6"
