@@ -12,28 +12,31 @@ inputs:
     required: false
     default: '.'
   fail-on-findings:
-    description: 'Fail the workflow if compliance gaps are found'
+    description: 'Fail the workflow if any checks fail'
     required: false
     default: 'false'
   output-format:
-    description: 'Output format: text, json, or sarif'
+    description: 'Output format: table or json'
     required: false
-    default: 'text'
-  min-score:
-    description: 'Minimum compliance score (0-100) to pass. Only used when fail-on-findings is true.'
+    default: 'table'
+  max-failures:
+    description: 'Maximum allowed failures before the action fails (only when fail-on-findings is true)'
     required: false
     default: '0'
 
 outputs:
-  score:
-    description: 'Overall compliance score (0-100)'
-    value: ${{ steps.scan.outputs.score }}
-  checks-passed:
-    description: 'Number of checks passed (out of 6)'
-    value: ${{ steps.scan.outputs.checks_passed }}
-  report-path:
-    description: 'Path to the full compliance report'
-    value: ${{ steps.scan.outputs.report_path }}
+  passing:
+    description: 'Number of checks passing'
+    value: ${{ steps.scan.outputs.passing }}
+  warnings:
+    description: 'Number of warnings'
+    value: ${{ steps.scan.outputs.warnings }}
+  failing:
+    description: 'Number of checks failing'
+    value: ${{ steps.scan.outputs.failing }}
+  total:
+    description: 'Total number of checks'
+    value: ${{ steps.scan.outputs.total }}
 
 runs:
   using: 'composite'
@@ -56,26 +59,29 @@ runs:
         echo "🔍 Scanning ${{ inputs.path }} for EU AI Act compliance..."
         echo ""
 
-        REPORT_PATH="${{ runner.temp }}/air-blackbox-report"
-
         air-blackbox comply \
-          --path "${{ inputs.path }}" \
+          --scan "${{ inputs.path }}" \
           --format "${{ inputs.output-format }}" \
-          --output "${REPORT_PATH}" \
-          2>&1 | tee scan_output.txt || true
+          -v \
+          2>&1 | tee /tmp/air-scan-output.txt || true
 
-        SCORE=$(grep -oP 'Score: \K[0-9]+' scan_output.txt 2>/dev/null || echo "0")
-        PASSED=$(grep -oP 'Passed: \K[0-9]+' scan_output.txt 2>/dev/null || echo "0")
+        SUMMARY=$(grep -oP '\d+ passing.*\d+ checks' /tmp/air-scan-output.txt || echo "0 passing 0 warnings 0 failing out of 0 checks")
 
-        echo "score=${SCORE}" >> $GITHUB_OUTPUT
-        echo "checks_passed=${PASSED}" >> $GITHUB_OUTPUT
-        echo "report_path=${REPORT_PATH}" >> $GITHUB_OUTPUT
+        PASSING=$(echo "$SUMMARY" | grep -oP '^\d+' || echo "0")
+        WARNINGS=$(echo "$SUMMARY" | grep -oP '\d+(?= warnings)' || echo "0")
+        FAILING=$(echo "$SUMMARY" | grep -oP '\d+(?= failing)' || echo "0")
+        TOTAL=$(echo "$SUMMARY" | grep -oP '\d+(?= checks)' || echo "0")
+
+        echo "passing=${PASSING}" >> $GITHUB_OUTPUT
+        echo "warnings=${WARNINGS}" >> $GITHUB_OUTPUT
+        echo "failing=${FAILING}" >> $GITHUB_OUTPUT
+        echo "total=${TOTAL}" >> $GITHUB_OUTPUT
 
         echo ""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "  AIR Blackbox — EU AI Act Compliance Report"
-        echo "  Score: ${SCORE}/100  |  Checks: ${PASSED}/6"
-        echo "  Deadline: August 2, 2026"
+        echo "  ✅ ${PASSING} passing  ⚠️ ${WARNINGS} warnings  ❌ ${FAILING} failing"
+        echo "  Total: ${TOTAL} checks  |  Deadline: August 2, 2026"
         echo "  https://github.com/airblackbox"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -83,10 +89,10 @@ runs:
       if: inputs.fail-on-findings == 'true'
       shell: bash
       run: |
-        SCORE="${{ steps.scan.outputs.score }}"
-        MIN="${{ inputs.min-score }}"
-        if [ "${SCORE}" -lt "${MIN}" ]; then
-          echo "❌ Compliance score ${SCORE} is below minimum threshold ${MIN}"
+        FAILING="${{ steps.scan.outputs.failing }}"
+        MAX="${{ inputs.max-failures }}"
+        if [ "${FAILING}" -gt "${MAX}" ]; then
+          echo "❌ ${FAILING} compliance failures exceeds maximum allowed (${MAX})"
           exit 1
         fi
-        echo "✅ Compliance score ${SCORE} meets minimum threshold ${MIN}"
+        echo "✅ ${FAILING} failures within allowed threshold (${MAX})"
