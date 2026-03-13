@@ -2,6 +2,8 @@
 #
 # Scans your Python AI code for EU AI Act technical compliance
 # using AIR Blackbox (https://github.com/airblackbox)
+#
+# Two-tier scoring: static checks (code patterns) vs runtime checks (gateway/trust layer)
 
 name: EU AI Act Compliance
 
@@ -30,5 +32,7 @@ jobs:
 
       - name: Print results
         run: |
-          echo "Compliance Score: ${{ steps.compliance.outputs.score }}/100"
-          echo "Checks Passed: ${{ steps.compliance.outputs.checks-passed }}/6"
+          echo "Score: ${{ steps.compliance.outputs.score }} (${{ steps.compliance.outputs.score-percent }}%)"
+          echo "Static: ${{ steps.compliance.outputs.static-passing }}/${{ steps.compliance.outputs.static-total }}"
+          echo "Runtime: ${{ steps.compliance.outputs.runtime-passing }}/${{ steps.compliance.outputs.runtime-total }}"
+          echo "Frameworks: ${{ steps.compliance.outputs.frameworks }}"

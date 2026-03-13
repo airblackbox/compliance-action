@@ -1,5 +1,5 @@
 name: 'AIR Blackbox - EU AI Act Compliance Check'
-description: 'Scan your Python AI code for EU AI Act technical compliance. Checks Articles 9, 10, 11, 12, 14, 15.'
+description: 'Scan your Python AI code for EU AI Act technical compliance. Checks Articles 9, 10, 11, 12, 14, 15 with two-tier scoring (static vs runtime).'
 author: 'AIR Blackbox (github.com/airblackbox)'
 
 branding:
@@ -15,14 +15,18 @@ inputs:
     description: 'Fail the workflow if any checks fail'
     required: false
     default: 'false'
-  output-format:
-    description: 'Output format: table or json'
-    required: false
-    default: 'table'
   max-failures:
     description: 'Maximum allowed failures before the action fails (only when fail-on-findings is true)'
     required: false
     default: '0'
+  min-score:
+    description: 'Minimum score percentage (0-100). Action fails if score is below this. Only applies when fail-on-findings is true.'
+    required: false
+    default: '0'
+  version:
+    description: 'AIR Blackbox version to install (default: latest)'
+    required: false
+    default: ''
 
 outputs:
   passing:
@@ -37,6 +41,27 @@ outputs:
   total:
     description: 'Total number of checks'
     value: ${{ steps.scan.outputs.total }}
+  score:
+    description: 'Score as passing/total'
+    value: ${{ steps.scan.outputs.score }}
+  score-percent:
+    description: 'Score as percentage (0-100)'
+    value: ${{ steps.scan.outputs.score_percent }}
+  static-passing:
+    description: 'Number of static checks passing'
+    value: ${{ steps.scan.outputs.static_passing }}
+  static-total:
+    description: 'Total static checks'
+    value: ${{ steps.scan.outputs.static_total }}
+  runtime-passing:
+    description: 'Number of runtime checks passing'
+    value: ${{ steps.scan.outputs.runtime_passing }}
+  runtime-total:
+    description: 'Total runtime checks'
+    value: ${{ steps.scan.outputs.runtime_total }}
+  frameworks:
+    description: 'Detected frameworks (comma-separated)'
+    value: ${{ steps.scan.outputs.frameworks }}
 
 runs:
   using: 'composite'
@@ -44,46 +69,151 @@ runs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.12'
 
     - name: Install AIR Blackbox
       shell: bash
       run: |
-        pip install air-blackbox --quiet
-        echo "✅ AIR Blackbox installed"
+        if [ -n "${{ inputs.version }}" ]; then
+          pip install "air-blackbox==${{ inputs.version }}" --quiet
+        else
+          pip install air-blackbox --quiet
+        fi
 
     - name: Run compliance scan
       id: scan
       shell: bash
       run: |
-        echo "🔍 Scanning ${{ inputs.path }} for EU AI Act compliance..."
-        echo ""
+        SCAN_PATH="${{ inputs.path }}"
+        echo "Scanning ${SCAN_PATH} for EU AI Act compliance..."
 
-        air-blackbox comply \
-          --scan "${{ inputs.path }}" \
-          --format "${{ inputs.output-format }}" \
-          -v \
-          2>&1 | tee /tmp/air-scan-output.txt || true
+        # Run scan and capture output (JSON has a text header we need to strip)
+        air-blackbox comply --scan "${SCAN_PATH}" --format json > /tmp/air-scan-raw.txt 2>/dev/null || true
 
-        SUMMARY=$(grep -oP '\d+ passing.*\d+ checks' /tmp/air-scan-output.txt || echo "0 passing 0 warnings 0 failing out of 0 checks")
+        # Parse with Python for reliability
+        python3 << 'PARSE_EOF'
+        import json, os, re
 
-        PASSING=$(echo "$SUMMARY" | grep -oP '^\d+' || echo "0")
-        WARNINGS=$(echo "$SUMMARY" | grep -oP '\d+(?= warnings)' || echo "0")
-        FAILING=$(echo "$SUMMARY" | grep -oP '\d+(?= failing)' || echo "0")
-        TOTAL=$(echo "$SUMMARY" | grep -oP '\d+(?= checks)' || echo "0")
+        # Read raw output and extract JSON (skip text header lines)
+        raw = ""
+        try:
+            with open("/tmp/air-scan-raw.txt") as f:
+                raw = f.read()
+        except Exception:
+            pass
 
-        echo "passing=${PASSING}" >> $GITHUB_OUTPUT
-        echo "warnings=${WARNINGS}" >> $GITHUB_OUTPUT
-        echo "failing=${FAILING}" >> $GITHUB_OUTPUT
-        echo "total=${TOTAL}" >> $GITHUB_OUTPUT
+        # The CLI outputs a text header then a JSON array — find where [ starts
+        articles = []
+        json_start = raw.find("[")
+        if json_start >= 0:
+            try:
+                articles = json.loads(raw[json_start:])
+            except Exception:
+                pass
 
-        echo ""
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "  AIR Blackbox — EU AI Act Compliance Report"
-        echo "  ✅ ${PASSING} passing  ⚠️ ${WARNINGS} warnings  ❌ ${FAILING} failing"
-        echo "  Total: ${TOTAL} checks  |  Deadline: August 2, 2026"
-        echo "  https://github.com/airblackbox"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        # Flatten: CLI outputs [{number, title, checks: [...]}, ...] per article
+        # We need a flat list of all checks
+        checks = []
+        for art in articles:
+            art_num = art.get("number", 0)
+            art_title = art.get("title", "")
+            for c in art.get("checks", []):
+                c["article"] = art_num
+                c["article_title"] = art_title
+                checks.append(c)
+
+        # Count by status
+        passing = sum(1 for c in checks if c.get("status") == "pass")
+        warnings = sum(1 for c in checks if c.get("status") == "warn")
+        failing = sum(1 for c in checks if c.get("status") == "fail")
+        total = len(checks)
+
+        # Two-tier breakdown
+        static_checks = [c for c in checks if c.get("tier", "static") == "static"]
+        runtime_checks = [c for c in checks if c.get("tier") == "runtime"]
+        s_pass = sum(1 for c in static_checks if c.get("status") == "pass")
+        s_total = len(static_checks)
+        r_pass = sum(1 for c in runtime_checks if c.get("status") == "pass")
+        r_total = len(runtime_checks)
+
+        # Score
+        score_pct = int(passing / total * 100) if total > 0 else 0
+
+        # Detect frameworks (not in JSON output, leave blank)
+        frameworks = ""
+
+        # Write outputs
+        with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+            out.write(f"passing={passing}\n")
+            out.write(f"warnings={warnings}\n")
+            out.write(f"failing={failing}\n")
+            out.write(f"total={total}\n")
+            out.write(f"score={passing}/{total}\n")
+            out.write(f"score_percent={score_pct}\n")
+            out.write(f"static_passing={s_pass}\n")
+            out.write(f"static_total={s_total}\n")
+            out.write(f"runtime_passing={r_pass}\n")
+            out.write(f"runtime_total={r_total}\n")
+            out.write(f"frameworks={frameworks}\n")
+
+        # Generate step summary
+        # Use article titles from the scan data itself
+        article_names = {}
+        for c in checks:
+            article_names[c.get("article", 0)] = c.get("article_title", f"Article {c.get('article', 0)}")
+
+        md = []
+        md.append("## EU AI Act Compliance Report")
+        md.append(f"**Score: {passing}/{total} ({score_pct}%)**  |  Deadline: August 2, 2026\n")
+
+        if frameworks:
+            md.append(f"Frameworks detected: {frameworks}\n")
+
+        # Summary table
+        md.append("| Metric | Value |")
+        md.append("|--------|-------|")
+        md.append(f"| Passing | {passing} |")
+        md.append(f"| Warnings | {warnings} |")
+        md.append(f"| Failing | {failing} |")
+        md.append(f"| Static checks | {s_pass}/{s_total} |")
+        md.append(f"| Runtime checks | {r_pass}/{r_total} |")
+
+        # Per-article breakdown
+        by_article = {}
+        for c in checks:
+            art = c.get("article", 0)
+            by_article.setdefault(art, []).append(c)
+
+        md.append("\n### Per-Article Breakdown\n")
+        md.append("| Article | Check | Status | Tier |")
+        md.append("|---------|-------|--------|------|")
+        for art_num in sorted(by_article.keys()):
+            art_name = article_names.get(art_num, f"Article {art_num}")
+            for c in by_article[art_num]:
+                icon = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}.get(c["status"], "?")
+                tier = c.get("tier", "static").upper()
+                md.append(f"| Art {art_num}: {art_name} | {c['name']} | {icon} | {tier} |")
+
+        # Fix hints for failing/warning checks
+        fixable = [c for c in checks if c.get("status") in ("fail", "warn") and c.get("fix_hint")]
+        if fixable:
+            md.append("\n### Recommended Fixes\n")
+            for c in fixable[:10]:
+                md.append(f"- **{c['name']}**: {c['fix_hint']}")
+
+        md.append(f"\n---\n*Scanned by [AIR Blackbox](https://github.com/airblackbox)*")
+
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as sm:
+            sm.write("\n".join(md))
+
+        # Print to logs too
+        print(f"\n{'='*50}")
+        print(f"  AIR Blackbox - EU AI Act Compliance")
+        print(f"  Score: {passing}/{total} ({score_pct}%)")
+        print(f"  Static: {s_pass}/{s_total}  |  Runtime: {r_pass}/{r_total}")
+        print(f"  Passing: {passing}  Warnings: {warnings}  Failing: {failing}")
+        print(f"{'='*50}")
+        PARSE_EOF
 
     - name: Check threshold
       if: inputs.fail-on-findings == 'true'
@@ -91,8 +221,19 @@ runs:
       run: |
         FAILING="${{ steps.scan.outputs.failing }}"
         MAX="${{ inputs.max-failures }}"
+        SCORE="${{ steps.scan.outputs.score_percent }}"
+        MIN_SCORE="${{ inputs.min-score }}"
+
+        # Check failure count
         if [ "${FAILING}" -gt "${MAX}" ]; then
-          echo "❌ ${FAILING} compliance failures exceeds maximum allowed (${MAX})"
+          echo "::error::EU AI Act compliance: ${FAILING} failures exceeds maximum allowed (${MAX})"
           exit 1
         fi
-        echo "✅ ${FAILING} failures within allowed threshold (${MAX})"
+
+        # Check minimum score
+        if [ "${MIN_SCORE}" -gt 0 ] && [ "${SCORE}" -lt "${MIN_SCORE}" ]; then
+          echo "::error::EU AI Act compliance score (${SCORE}%) is below minimum (${MIN_SCORE}%)"
+          exit 1
+        fi
+
+        echo "Compliance check passed: ${FAILING} failures (max: ${MAX}), score: ${SCORE}% (min: ${MIN_SCORE}%)"
