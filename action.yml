@@ -115,7 +115,8 @@ runs:
         # We need a flat list of all checks
         checks = []
         for art in articles:
-            art_num = art.get("number", 0)
+            raw_num = art.get("number", 0)
+            art_num = int(raw_num) if str(raw_num).isdigit() else raw_num
             art_title = art.get("title", "")
             for c in art.get("checks", []):
                 c["article"] = art_num
@@ -187,7 +188,7 @@ runs:
         md.append("\n### Per-Article Breakdown\n")
         md.append("| Article | Check | Status | Tier |")
         md.append("|---------|-------|--------|------|")
-        for art_num in sorted(by_article.keys()):
+        for art_num in sorted(by_article.keys(), key=lambda x: (isinstance(x, str), x)):
             art_name = article_names.get(art_num, f"Article {art_num}")
             for c in by_article[art_num]:
                 icon = {"pass": "PASS", "warn": "WARN", "fail": "FAIL"}.get(c["status"], "?")
